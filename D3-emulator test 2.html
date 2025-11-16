@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VPET Emulator – Battle with A/B</title>
+<style>
+body { background:#071428; color:#fff; font-family:system-ui; display:flex; flex-direction:column; align-items:center; padding:18px; margin:0; }
+.device { position:relative; width:320px; padding:14px; border-radius:24px; background:#0b1a2b; border:6px solid #0a3b35; box-shadow:0 8px 30px rgba(0,0,0,.6); margin-bottom:12px; }
+#petCanvas { background:#021124; border-radius:12px; display:block; margin-bottom:12px; }
+.vpet-buttons { display:flex; flex-direction:column; gap:12px; position:absolute; right:12px; top:12px; }
+.vpet-buttons button { width:48px; height:48px; border-radius:50%; background:#0b1f2b; border:2px solid #0aa89b; color:#fff; font-weight:700; cursor:pointer; }
+.stats { display:flex; justify-content:space-between; margin-bottom:8px; }
+.stat { background: rgba(255,255,255,0.04); padding:4px; border-radius:6px; font-size:13px; text-align:center; flex:1; margin:0 2px; }
+#message { text-align:center; margin-bottom:8px; }
+#gridContainer { width:680px; margin-top:8px; overflow:auto; transition:max-height 0.3s ease; }
+#gridCanvas { background:#021124; cursor:pointer; border:2px solid #0aa89b; display:block; }
+.nav { display:flex; justify-content:center; gap:10px; margin-top:4px; margin-bottom:8px; }
+button.pageToggle { margin-bottom:8px; padding:4px 12px; background:#0aa89b; border:none; border-radius:6px; color:#fff; cursor:pointer; }
+#log { color:#9fd8cf; margin-top:4px; font-size:12px; }
+</style>
+</head>
+<body>
+
+<div class="device" id="deviceFrame">
+  <canvas id="petCanvas" width="260" height="160"></canvas>
+  <div class="vpet-buttons">
+    <button id="btnA">A</button>
+    <button id="btnB">B</button>
+    <button id="btnC">C</button>
+  </div>
+</div>
+
+<div id="message">Select a sprite from the grid</div>
+
+<div class="stats">
+  <div class="stat" id="statHunger">Hunger: 50</div>
+  <div class="stat" id="statHappiness">Happiness: 70</div>
+  <div class="stat" id="statTraining">Training: 0XP</div>
+  <div class="stat" id="statEnergy">Energy: 10</div>
+  <div class="stat" id="statHP">HP: 10</div>
+  <div class="stat" id="statEnemyHP">Enemy HP: 10</div>
+</div>
+
+<button class="pageToggle" id="toggleGrid">Toggle Sprite Grid</button>
+
+<div id="gridContainer">
+  <div class="nav">
+    <button id="prevPage">&lt; Prev</button>
+    <div id="pageLabel">Page 1</div>
+    <button id="nextPage">Next &gt;</button>
+  </div>
+  <canvas id="gridCanvas" width="660" height="660"></canvas>
+</div>
+
+<div>
+  Zoom: <input type="range" id="zoomSlider" min="0.5" max="5" step="0.05" value="1">
+</div>
+
+<div id="log">Waiting...</div>
+
+<div style="margin-top:8px;">
+  Device Color:
+  <button class="frameColor" data-color="#d32f2f" style="background:#d32f2f;width:24px;height:24px;border:none;border-radius:4px;cursor:pointer;"></button>
+  <button class="frameColor" data-color="#1976d2" style="background:#1976d2;width:24px;height:24px;border:none;border-radius:4px;cursor:pointer;"></button>
+  <button class="frameColor" data-color="#388e3c" style="background:#388e3c;width:24px;height:24px;border:none;border-radius:4px;cursor:pointer;"></button>
+  <button class="frameColor" data-color="#f57c00" style="background:#f57c00;width:24px;height:24px;border:none;border-radius:4px;cursor:pointer;"></button>
+</div>
+
+<script>
+const PAGE_ROWS = 11, PAGE_COLS = 11;
+const TOTAL_PAGES = 19;
+let SPRITE_SIZE = 64;
+
+const petCanvas = document.getElementById('petCanvas');
+const pctx = petCanvas.getContext('2d');
+const gridCanvas = document.getElementById('gridCanvas');
+const gctx = gridCanvas.getContext('2d');
+
+let zoom = 1;
+document.getElementById('zoomSlider').oninput = e => { zoom = parseFloat(e.target.value); drawPet(); };
+
+let pages = {};
+let pageLoaded = {};
+let currentPage = 1;
+let selectedCol = 0;
+let selectedRow = 0;
+let animFrame = 0;
+let animationInterval = null;
+
+let hunger=50,happiness=70,trainingXP=0,trainingLevel=0,energy=10,playerHP=10,enemyHP=10;
+let enemySprite = {page:1,col:0,row:0};
+let animState='idle'; // idle, sleep, battle, win, lose
+
+function updateStats(){
+  document.getElementById('statHunger').textContent = "Hunger: "+hunger;
+  document.getElementById('statHappiness').textContent = "Happiness: "+happiness;
+  document.getElementById('statTraining').textContent = `Training: ${trainingXP}XP (Lvl ${trainingLevel})`;
+  document.getElementById('statEnergy').textContent = "Energy: "+energy;
+  document.getElementById('statHP').textContent = "HP: "+playerHP;
+  document.getElementById('statEnemyHP').textContent = "Enemy HP: "+enemyHP;
+}
+
+const menus = ["Feed","Train","Battle","Clean","Sleep"];
+let menuIndex=0;
+
+// Load sprite page
+function loadPage(n, callback){
+  if(pageLoaded[n]){ if(callback) callback(); return; }
+  const img = new Image();
+  img.src = `sprites/page${n}.png`;
+  img.onload = function(){
+    pages[n] = img;
+    SPRITE_SIZE = Math.floor(img.width / PAGE_COLS);
+    pageLoaded[n] = true;
+    if(callback) callback();
+  }
+  img.onerror = function(){ document.getElementById('log').textContent = 'Failed to load page '+n; pageLoaded[n] = false; }
+}
+
+// Grid click
+gridCanvas.addEventListener('click', ev=>{
+  const rect = gridCanvas.getBoundingClientRect();
+  const mx = ev.clientX - rect.left;
+  const my = ev.clientY - rect.top;
+  const col = Math.floor(mx / SPRITE_SIZE);
+  const row = Math.floor(my / SPRITE_SIZE);
+  if(col<0||col>=PAGE_COLS||row<0||row>=PAGE_ROWS) return;
+  selectedCol = col;
+  selectedRow = row;
+  animFrame=0;
+  drawGrid();
+  drawPet();
+  document.getElementById('log').textContent = 'Selected sprite col:'+col+' row:'+row+' page:'+currentPage;
+});
+
+// Draw grid
+function drawGrid(){
+  const img = pages[currentPage]; if(!img) return;
+  gctx.clearRect(0,0,gridCanvas.width,gridCanvas.height);
+  for(let r=0;r<PAGE_ROWS;r++){
+    for(let c=0;c<PAGE_COLS;c++){
+      const x = c*SPRITE_SIZE;
+      const y = r*SPRITE_SIZE;
+      gctx.drawImage(img,c*SPRITE_SIZE,r*SPRITE_SIZE,SPRITE_SIZE,SPRITE_SIZE,x,y,SPRITE_SIZE,SPRITE_SIZE);
+      if(c===selectedCol && r===selectedRow){
+        gctx.strokeStyle='#ff0'; gctx.lineWidth=2;
+        gctx.strokeRect(x,y,SPRITE_SIZE,SPRITE_SIZE);
+      }
+    }
+  }
+  document.getElementById('pageLabel').textContent = 'Page '+currentPage;
+}
+
+// Animation helper
+function getAnimRow(state){
+  switch(state){
+    case 'idle': return animFrame%2;
+    case 'sleep': return 2 + (animFrame%2);
+    case 'battle': return 4 + (animFrame%3);
+    case 'win': return 5 + (animFrame%3);
+    case 'lose': return 9 + (animFrame%2);
+    default: return 0;
+  }
+}
+
+// Draw sprites
+let flashTimer=0;
+function drawPet(){
+  const img = pages[currentPage]; if(!img) return;
+
+  pctx.clearRect(0,0,petCanvas.width,petCanvas.height);
+
+  if(flashTimer>0){
+    pctx.fillStyle='rgba(255,255,255,0.4)';
+    pctx.fillRect(0,0,petCanvas.width,petCanvas.height);
+    flashTimer--;
+  }
+
+  // Player
+  const row = getAnimRow(animState);
+  const sx = selectedCol*SPRITE_SIZE;
+  const sy = row*SPRITE_SIZE;
+  const sw = SPRITE_SIZE;
+  const sh = SPRITE_SIZE;
+  const dw = sw*zoom;
+  const dh = sh*zoom;
+  const dx = petCanvas.width*0.65 - dw/2;
+  const dy = petCanvas.height/2 - dh/2;
+  pctx.drawImage(img,sx,sy,sw,sh,dx,dy,dw,dh);
+
+  // Enemy
+  if(animState==='battle'){
+    const eimg = pages[enemySprite.page]; if(!eimg) return;
+    const erow = getAnimRow('battle');
+    const esx = enemySprite.col*SPRITE_SIZE;
+    const esy = erow*SPRITE_SIZE;
+    const edw = SPRITE_SIZE*zoom;
+    const edh = SPRITE_SIZE*zoom;
+    const edx = petCanvas.width*0.35 - edw/2;
+    const edy = petCanvas.height/2 - edh/2;
+
+    pctx.save();
+    pctx.translate(edx+edw/2, edy+edh/2);
+    pctx.scale(-1,1);
+    pctx.drawImage(eimg,esx,esy,SPRITE_SIZE,SPRITE_SIZE,-edw/2,-edh/2,edw,edh);
+    pctx.restore();
+  }
+}
+
+function flashAttack(){ flashTimer=2; }
+
+// Animation loop
+function startAnimation(){
+  if(animationInterval) clearInterval(animationInterval);
+  animationInterval = setInterval(()=>{
+    animFrame++;
+    drawPet();
+  },300);
+}
+
+// Menu buttons
+document.getElementById('btnA').addEventListener('click', ()=>{ menuIndex=(menuIndex+1)%menus.length; document.getElementById('message').textContent = menus[menuIndex]; });
+document.getElementById('btnB').addEventListener('click', ()=>{
+  const action = menus[menuIndex];
+  document.getElementById('message').textContent = 'Selected: '+action;
+  if(action==='Feed'){ hunger=Math.min(100,hunger+30); updateStats(); }
+  if(action==='Train'){ trainingXP++; if(trainingXP%10===0 && trainingLevel<10){ playerHP=Math.min(100,playerHP+5); trainingLevel++; } updateStats(); }
+  if(action==='Sleep'){ animState='sleep'; setTimeout(()=>{animState='idle';},20000); happiness=Math.min(100,happiness+20); energy=Math.min(10,energy+5); updateStats(); }
+  if(action==='Battle'){ startABBattle(); }
+});
+document.getElementById('btnC').addEventListener('click', ()=>{ menuIndex=0; document.getElementById('message').textContent = menus[menuIndex]; });
+
+// A/B Battle
+function startABBattle(){
+  if(energy<=0){ alert("Need to rest!"); return; }
+  energy--; playerHP=10; enemyHP=10;
+  enemySprite.page = 1+Math.floor(Math.random()*TOTAL_PAGES);
+  enemySprite.col = Math.floor(Math.random()*PAGE_COLS);
+  enemySprite.row = Math.floor(Math.random()*PAGE_ROWS);
+  animState='battle'; animFrame=0;
+
+  let battleInterval = setInterval(()=>{
+    if(playerHP<=0 || enemyHP<=0){ clearInterval(battleInterval); animState = (playerHP>0)?'win':'lose'; setTimeout(()=>{animState='idle'; animFrame=0;},2000); return;}
+    // Player chooses randomly A or B (simulate)
+    const playerChoice = Math.random()<0.5?'A':'B';
+    const enemyChoice = Math.random()<0.5?'A':'B';
+    if(playerChoice===enemyChoice){ enemyHP=Math.max(0,enemyHP-5); flashAttack(); }
+    else{ playerHP=Math.max(0,playerHP-5); flashAttack(); }
+    updateStats();
+  },1000);
+}
+
+// Toggle grid panel
+document.getElementById('toggleGrid').addEventListener('click', ()=>{
+  const grid = document.getElementById('gridContainer');
+  grid.style.maxHeight = (grid.style.maxHeight && grid.style.maxHeight!=="0px")?"0px":"700px";
+});
+
+// Page navigation
+document.getElementById('nextPage').addEventListener('click', ()=>{ if(currentPage<TOTAL_PAGES) currentPage++; loadPage(currentPage, drawGrid); });
+document.getElementById('prevPage').addEventListener('click', ()=>{ if(currentPage>1) currentPage--; loadPage(currentPage, drawGrid); });
+
+// Device color
+document.querySelectorAll('.frameColor').forEach(btn=>{ btn.addEventListener('click', ()=>{ document.getElementById('deviceFrame').style.background = btn.getAttribute('data-color'); }); });
+
+// Load first page
+loadPage(1, ()=>{
+  drawGrid();
+  drawPet();
+  startAnimation();
+  for(let i=2;i<=TOTAL_PAGES;i++) loadPage(i);
+});
+
+updateStats();
+</script>
+</body>
+</html>
